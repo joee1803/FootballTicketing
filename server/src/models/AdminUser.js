@@ -10,7 +10,8 @@ const adminUserSchema = new mongoose.Schema(
       enum: ["SUPER_ADMIN", "ADMIN"],
       required: true,
       default: "ADMIN"
-    }
+    },
+    isPrimarySuperAdmin: { type: Boolean, default: false }
   },
   { timestamps: true }
 );

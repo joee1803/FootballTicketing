@@ -1,6 +1,9 @@
 const Match = require("../models/Match");
 const defaultFixtures = require("../data/defaultFixtures");
+const featuredClubFixtures = require("../data/featuredClubFixtures");
 const { getTicketingContract } = require("./blockchain");
+
+const seededFixtures = [...defaultFixtures, ...featuredClubFixtures];
 
 function buildTransferCutoff(matchDate) {
   return new Date(new Date(matchDate).getTime() - 30 * 60 * 1000);
@@ -8,6 +11,22 @@ function buildTransferCutoff(matchDate) {
 
 function buildMatchEndTime(matchDate) {
   return new Date(new Date(matchDate).getTime() + 90 * 60 * 1000);
+}
+
+function buildTicketPriceCredits(fixture) {
+  if (Number.isFinite(Number(fixture.ticketPriceCredits))) {
+    return Number(fixture.ticketPriceCredits);
+  }
+
+  const kickoffHour = new Date(fixture.matchDate).getHours();
+  if (kickoffHour >= 19) {
+    return 60;
+  }
+  if (kickoffHour >= 16) {
+    return 45;
+  }
+
+  return 35;
 }
 
 async function ensureMatchOnChain(contract, fixture) {
@@ -39,9 +58,10 @@ async function seedDefaultMatches() {
   let created = 0;
   let skippedPast = 0;
 
-  for (const fixture of defaultFixtures) {
+  for (const fixture of seededFixtures) {
     const transferCutoff = buildTransferCutoff(fixture.matchDate);
     const matchEndTime = buildMatchEndTime(fixture.matchDate);
+    const ticketPriceCredits = buildTicketPriceCredits(fixture);
 
     await Match.updateOne(
       { matchId: fixture.matchId },
@@ -50,6 +70,7 @@ async function seedDefaultMatches() {
           homeTeam: fixture.homeTeam,
           awayTeam: fixture.awayTeam,
           stadium: fixture.stadium,
+          ticketPriceCredits,
           matchDate: new Date(fixture.matchDate),
           matchEndTime,
           latestCheckInTime: transferCutoff,
@@ -69,7 +90,7 @@ async function seedDefaultMatches() {
   }
 
   return {
-    total: defaultFixtures.length,
+    total: seededFixtures.length,
     created,
     skippedPast
   };

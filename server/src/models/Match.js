@@ -6,6 +6,7 @@ const matchSchema = new mongoose.Schema(
     homeTeam: { type: String, required: true, trim: true },
     awayTeam: { type: String, required: true, trim: true },
     stadium: { type: String, required: true, trim: true },
+    ticketPriceCredits: { type: Number, required: true, min: 0, default: 30 },
     matchDate: { type: Date, required: true },
     matchEndTime: { type: Date, required: true },
     latestCheckInTime: { type: Date, required: true },

@@ -2,7 +2,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 function getJwtSecret() {
-  return process.env.JWT_SECRET || "local-demo-secret";
+  return process.env.JWT_SECRET || "local-development-secret";
 }
 
 async function hashPassword(password) {
@@ -19,7 +19,8 @@ function signAdminToken(admin) {
       sub: admin._id.toString(),
       role: admin.role,
       email: admin.email,
-      name: admin.name
+      name: admin.name,
+      isPrimarySuperAdmin: Boolean(admin.isPrimarySuperAdmin)
     },
     getJwtSecret(),
     { expiresIn: "8h" }

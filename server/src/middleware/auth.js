@@ -17,6 +17,7 @@ function requireAdmin(req, res, next) {
     }
 
     req.admin = verifyAdminToken(token);
+    req.admin.id = req.admin.sub;
     return next();
   } catch (_error) {
     return res.status(401).json({ error: "Invalid or expired admin token" });

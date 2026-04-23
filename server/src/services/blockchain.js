@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { Contract, JsonRpcProvider, NonceManager, Wallet, isAddress } = require("ethers");
+const { Contract, JsonRpcProvider, NonceManager, Wallet, formatEther, isAddress, parseEther, toBeHex } = require("ethers");
 
 let initialized = false;
 let provider;
@@ -10,6 +10,23 @@ let abi;
 let backendAddress;
 let activeRpcUrl;
 let activeContractAddress;
+
+function resolveNetworkName(network) {
+  const chainId = Number(network?.chainId);
+  const name = String(network?.name || "").trim();
+
+  if (name && name !== "unknown") {
+    return name;
+  }
+  if (chainId === 31337) {
+    return "Hardhat Local";
+  }
+  if (chainId === 1337) {
+    return "Local Development";
+  }
+
+  return "Unknown network";
+}
 
 function artifactPath() {
   return path.resolve(process.cwd(), "artifacts", "contracts", "Ticketing.sol", "Ticketing.json");
@@ -99,6 +116,18 @@ function validateWalletAddress(address) {
   if (!isAddress(String(address || "").trim())) {
     throw new Error("A valid Ethereum wallet address is required.");
   }
+}
+
+async function requireLocalFundingNetwork() {
+  ensureInitialized();
+  const network = await provider.getNetwork();
+  const chainId = Number(network.chainId);
+
+  if (chainId !== 31337 && chainId !== 1337) {
+    throw new Error("Wallet funding is only available on the local development network.");
+  }
+
+  return network;
 }
 
 function wrapWrite(methodName) {
@@ -198,13 +227,65 @@ function getBackendAddress() {
   return backendAddress;
 }
 
+async function getWalletFundingStatus(address) {
+  ensureInitialized();
+  validateWalletAddress(address);
+
+  const normalizedAddress = String(address).trim();
+  const network = await provider.getNetwork();
+  const balanceHex = await provider.send("eth_getBalance", [normalizedAddress, "latest"]);
+  const balanceWei = BigInt(balanceHex);
+
+  return {
+    address: normalizedAddress,
+    chainId: Number(network.chainId),
+    networkName: resolveNetworkName(network),
+    balanceWei: balanceWei.toString(),
+    balanceEth: formatEther(balanceWei)
+  };
+}
+
+async function fundWallet(address, amountEth = "2.0") {
+  ensureInitialized();
+  validateWalletAddress(address);
+  await requireLocalFundingNetwork();
+
+  const normalizedAddress = String(address).trim();
+  const currentBalance = await provider.getBalance(normalizedAddress);
+  const nextBalance = currentBalance + parseEther(String(amountEth));
+  const nextBalanceHex = toBeHex(nextBalance);
+
+  try {
+    await provider.send("hardhat_setBalance", [
+      normalizedAddress,
+      nextBalanceHex
+    ]);
+  } catch (error) {
+    try {
+      await provider.send("anvil_setBalance", [
+        normalizedAddress,
+        nextBalanceHex
+      ]);
+    } catch {
+      throw error;
+    }
+  }
+
+  const updated = await getWalletFundingStatus(normalizedAddress);
+  return {
+    ...updated,
+    txHash: null,
+    fundedAmountEth: String(amountEth)
+  };
+}
+
 async function getBlockchainStatus() {
   ensureInitialized();
   const network = await provider.getNetwork();
 
   return {
     chainId: Number(network.chainId),
-    networkName: network.name,
+    networkName: resolveNetworkName(network),
     rpcUrl: activeRpcUrl,
     contractAddress: activeContractAddress,
     backendAddress
@@ -212,9 +293,11 @@ async function getBlockchainStatus() {
 }
 
 module.exports = {
+  fundWallet,
   getBackendAddress,
   getBlockchainStatus,
   getTicketingContract,
+  getWalletFundingStatus,
   initializeTicketingContract,
   isEthereumAddress: isAddress,
   mapStatus,

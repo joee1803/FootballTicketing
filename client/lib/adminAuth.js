@@ -1,4 +1,13 @@
 const STORAGE_KEY = "football-ticket-admin-session";
+const SESSION_EVENT = "football-ticket-session-change";
+
+function emitSessionChange() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.dispatchEvent(new Event(SESSION_EVENT));
+}
 
 export function saveAdminSession(session) {
   if (typeof window === "undefined") {
@@ -6,6 +15,7 @@ export function saveAdminSession(session) {
   }
 
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+  emitSessionChange();
 }
 
 export function loadAdminSession() {
@@ -31,4 +41,5 @@ export function clearAdminSession() {
   }
 
   window.localStorage.removeItem(STORAGE_KEY);
+  emitSessionChange();
 }

@@ -3,9 +3,14 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { AppStateScreen } from "./AppStateScreen";
 import { buildAssignedSupporterEmail } from "../lib/identity";
-import { connectMetaMaskWallet } from "../lib/wallet";
+import { FEATURED_CLUBS } from "../lib/pricing";
+import { loadActiveSession, loadSessionState, saveExclusiveSupporterProfile } from "../lib/sessionState";
+import { connectMetaMaskWallet, getConnectedMetaMaskWallet, watchMetaMaskWallet } from "../lib/wallet";
 import { PasswordField } from "./PasswordField";
+import { HelpButton } from "./HelpButton";
+import { useToast } from "./ToastProvider";
 import {
   registerSupporterProfile,
   signInSupporterProfile
@@ -28,10 +33,23 @@ const defaultRegisterForm = {
 
 export function FanAuthPortal() {
   const router = useRouter();
+  const { pushToast } = useToast();
   const [mode, setMode] = useState("sign-in");
   const [signInForm, setSignInForm] = useState(defaultSignInForm);
   const [registerForm, setRegisterForm] = useState(defaultRegisterForm);
-  const [message, setMessage] = useState("Sign in or register to continue.");
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const activeSession = loadActiveSession();
+
+    // The homepage becomes the signed-in user's dashboard until they explicitly sign out.
+    if (activeSession?.dashboardPath) {
+      router.replace(activeSession.dashboardPath);
+      return;
+    }
+
+    setReady(true);
+  }, [router]);
 
   useEffect(() => {
     if (!registerForm.firstName || !registerForm.lastName || registerForm.email) {
@@ -44,15 +62,56 @@ export function FanAuthPortal() {
     }));
   }, [registerForm.firstName, registerForm.lastName, registerForm.email]);
 
+  useEffect(() => {
+    let active = true;
+
+    // MetaMask can already be connected before the page opens, so hydrate the wallet automatically.
+    async function hydrateWallet() {
+      const walletAddress = await getConnectedMetaMaskWallet();
+      if (!active || !walletAddress) {
+        return;
+      }
+
+      setRegisterForm((current) => ({
+        ...current,
+        walletAddress
+      }));
+    }
+
+    hydrateWallet();
+    const unsubscribe = watchMetaMaskWallet((walletAddress) => {
+      if (!active) {
+        return;
+      }
+
+      setRegisterForm((current) => ({
+        ...current,
+        walletAddress
+      }));
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
   async function handleSignIn(event) {
     event.preventDefault();
 
+    if (loadSessionState().adminSession) {
+      pushToast("Sign out of the admin dashboard before signing in as a supporter.", "error");
+      router.push("/admin");
+      return;
+    }
+
     try {
       const supporter = await signInSupporterProfile(signInForm);
-      setMessage(`Welcome back, ${supporter.fullName}. Redirecting to the fan portal...`);
+      saveExclusiveSupporterProfile(supporter);
+      pushToast(`Welcome back, ${supporter.fullName}.`, "info");
       router.push("/fan");
     } catch (error) {
-      setMessage(error.message);
+      pushToast(error.message, "error");
     }
   }
 
@@ -60,13 +119,19 @@ export function FanAuthPortal() {
     event.preventDefault();
     const assignedEmail = registerForm.email || buildAssignedSupporterEmail(registerForm.firstName, registerForm.lastName);
 
+    if (loadSessionState().adminSession) {
+      pushToast("Sign out of the admin dashboard before registering a supporter account.", "error");
+      router.push("/admin");
+      return;
+    }
+
     if (!registerForm.firstName || !registerForm.lastName || !assignedEmail || !registerForm.password || !registerForm.confirmPassword) {
-      setMessage("First name, last name, email, password, and confirm password are required to register.");
+      pushToast("First name, last name, email, password, and confirm password are required to register.", "error");
       return;
     }
 
     if (registerForm.password !== registerForm.confirmPassword) {
-      setMessage("Password and confirm password must match.");
+      pushToast("Password and confirm password must match.", "error");
       return;
     }
 
@@ -75,25 +140,34 @@ export function FanAuthPortal() {
         ...registerForm,
         email: assignedEmail
       });
-      setMessage(`Supporter account created for ${supporter.fullName}. Assigned email: ${supporter.email}`);
+      saveExclusiveSupporterProfile(supporter);
+      pushToast(`Supporter account created for ${supporter.fullName}. Assigned email: ${supporter.email}`, "info");
       router.push("/fan");
     } catch (error) {
-      setMessage(error.message);
+      if (error.message.includes("already linked to another supporter account")) {
+        pushToast("This MetaMask wallet is already linked to an existing supporter account. Sign in with that account or switch to a different wallet.", "error");
+        return;
+      }
+
+      pushToast(error.message, "error");
     }
   }
 
   async function handleWalletConnect() {
     try {
-      setMessage("Connecting MetaMask wallet...");
       const walletAddress = await connectMetaMaskWallet();
       setRegisterForm((current) => ({
         ...current,
         walletAddress
       }));
-      setMessage(`MetaMask wallet connected: ${walletAddress}`);
+      pushToast(`MetaMask wallet connected: ${walletAddress}`, "info");
     } catch (error) {
-      setMessage(error.message);
+      pushToast(error.message, "error");
     }
+  }
+
+  if (!ready) {
+    return <AppStateScreen eyebrow="Fan Portal" title="Checking active session" message="Working out whether this browser should open the homepage or take you straight back to your dashboard." />;
   }
 
   return (
@@ -102,7 +176,18 @@ export function FanAuthPortal() {
         <aside className="authStory authStoryFan panel">
           <p className="eyebrow">Fan Portal</p>
           <h1>Fan sign in and registration.</h1>
-          <p className="authCaption">Smooth entry into the supporter experience.</p>
+          <p className="authCaption">Secure access to fixtures, tickets, and account details.</p>
+          <div className="actions">
+            <HelpButton
+              title="Supporter Sign-In Guide"
+              steps={[
+                "Register with your name and password first. Your supporter email is assigned automatically.",
+                "Choose a favourite club from the featured list if you want discounted pricing whenever that club appears in a fixture.",
+                "If MetaMask is already unlocked in the browser, your wallet should appear automatically on the register form.",
+                "After sign-in, use Fixtures to book, Tickets to review what you own, and Profile for account and wallet details."
+              ]}
+            />
+          </div>
         </aside>
 
         <section className="authSurface panel">
@@ -159,14 +244,20 @@ export function FanAuthPortal() {
                       readOnly
                     />
                     <button type="button" className="ghostButton" onClick={handleWalletConnect}>
-                      Connect MetaMask
+                      {registerForm.walletAddress ? "Refresh MetaMask" : "Connect MetaMask"}
                     </button>
                   </div>
-                  <input
-                    placeholder="Favourite club"
+                  <select
                     value={registerForm.favouriteClub}
                     onChange={(event) => setRegisterForm({ ...registerForm, favouriteClub: event.target.value })}
-                  />
+                  >
+                    <option value="">Favourite club for eligible ticket discounts</option>
+                    {FEATURED_CLUBS.map((club) => (
+                      <option key={club} value={club}>
+                        {club}
+                      </option>
+                    ))}
+                  </select>
                   <PasswordField
                     placeholder="Password"
                     value={registerForm.password}
@@ -201,8 +292,6 @@ export function FanAuthPortal() {
               Register
             </button>
           </div>
-
-          <p className="feedback">{message}</p>
         </section>
       </section>
     </main>

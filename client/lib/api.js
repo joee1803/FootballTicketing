@@ -20,7 +20,20 @@ export async function apiFetch(path, options = {}) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `Request failed with status ${response.status}`);
+    let message = text || `Request failed with status ${response.status}`;
+
+    if (text) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.error) {
+          message = parsed.error;
+        }
+      } catch {
+        message = text;
+      }
+    }
+
+    throw new Error(message);
   }
 
   return response.json();

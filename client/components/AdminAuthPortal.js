@@ -1,11 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { saveAdminSession } from "../lib/adminAuth";
+import { clearSupporterProfile } from "../lib/supporterProfile";
 import { apiFetch } from "../lib/api";
 import { buildAssignedAdminEmail } from "../lib/identity";
+import { loadSessionState, saveExclusiveAdminSession } from "../lib/sessionState";
+import { AppStateScreen } from "./AppStateScreen";
+import { HelpButton } from "./HelpButton";
+import { useToast } from "./ToastProvider";
 import { PasswordField } from "./PasswordField";
 
 const defaultSignInForm = {
@@ -23,10 +28,30 @@ const defaultRequestForm = {
 
 export function AdminAuthPortal() {
   const router = useRouter();
+  const { pushToast } = useToast();
   const [mode, setMode] = useState("sign-in");
   const [signInForm, setSignInForm] = useState(defaultSignInForm);
   const [requestForm, setRequestForm] = useState(defaultRequestForm);
-  const [message, setMessage] = useState("Sign in or request admin access.");
+  const [ready, setReady] = useState(false);
+  const [blockedSupporter, setBlockedSupporter] = useState(null);
+
+  useEffect(() => {
+    const { adminSession, supporterSession } = loadSessionState();
+
+    // Admin and supporter identities are exclusive so privileged screens cannot overlap with fan access.
+    if (adminSession) {
+      router.replace("/admin");
+      return;
+    }
+
+    if (supporterSession) {
+      setBlockedSupporter(supporterSession);
+      setReady(true);
+      return;
+    }
+
+    setReady(true);
+  }, [router]);
 
   useEffect(() => {
     if (!requestForm.name || requestForm.email) {
@@ -41,7 +66,12 @@ export function AdminAuthPortal() {
 
   async function handleSignIn(event) {
     event.preventDefault();
-    setMessage("Signing in to admin controls...");
+
+    if (loadSessionState().supporterSession) {
+      pushToast("Sign out of the supporter dashboard before signing in as an admin.", "error");
+      setBlockedSupporter(loadSessionState().supporterSession);
+      return;
+    }
 
     try {
       const session = await apiFetch("/api/auth/admin/sign-in", {
@@ -49,11 +79,11 @@ export function AdminAuthPortal() {
         body: JSON.stringify(signInForm)
       });
 
-      saveAdminSession(session);
-      setMessage(`Welcome back, ${session.admin.name}. Redirecting to admin controls...`);
+      saveExclusiveAdminSession(session);
+      pushToast(`Welcome back, ${session.admin.name}.`, "info");
       router.push("/admin");
     } catch (error) {
-      setMessage(error.message);
+      pushToast(error.message, "error");
     }
   }
 
@@ -61,17 +91,21 @@ export function AdminAuthPortal() {
     event.preventDefault();
     const assignedEmail = requestForm.email || buildAssignedAdminEmail(requestForm.name);
 
+    if (loadSessionState().supporterSession) {
+      pushToast("Sign out of the supporter dashboard before requesting admin access.", "error");
+      setBlockedSupporter(loadSessionState().supporterSession);
+      return;
+    }
+
     if (!requestForm.name || !assignedEmail || !requestForm.password || !requestForm.confirmPassword) {
-      setMessage("Name, email, password, and confirm password are required.");
+      pushToast("Name, email, password, and confirm password are required.", "error");
       return;
     }
 
     if (requestForm.password !== requestForm.confirmPassword) {
-      setMessage("Password and confirm password must match.");
+      pushToast("Password and confirm password must match.", "error");
       return;
     }
-
-    setMessage("Submitting admin access request...");
 
     try {
       await apiFetch("/api/auth/admin/request", {
@@ -82,11 +116,64 @@ export function AdminAuthPortal() {
         })
       });
 
-      setMessage(`Your admin request has been submitted. Assigned email: ${assignedEmail}`);
+      pushToast(`Admin request submitted. Assigned email: ${assignedEmail}`, "info");
       setRequestForm(defaultRequestForm);
     } catch (error) {
-      setMessage(error.message);
+      pushToast(error.message, "error");
     }
+  }
+
+  function handleSupporterSignOut() {
+    clearSupporterProfile();
+    setBlockedSupporter(null);
+    pushToast("Supporter session signed out. You can now continue with admin access.", "info");
+  }
+
+  if (!ready) {
+    return <AppStateScreen eyebrow="Admin Access" title="Checking active session" message="Checking whether this browser already belongs to a supporter or admin before opening admin access." />;
+  }
+
+  if (blockedSupporter) {
+    return (
+      <main className="shell authShell">
+        <section className="authDeck">
+          <aside className="authStory authStoryAdmin panel">
+            <p className="eyebrow">Admin Access</p>
+            <h1>Sign out of the supporter dashboard first.</h1>
+            <p className="authCaption">Only one active role can use the app at a time, so supporter and admin sessions cannot overlap.</p>
+          </aside>
+
+          <section className="authSurface panel">
+            <div className="authBlockedCard">
+              <p className="eyebrow">Active supporter session</p>
+              <h2>{blockedSupporter.fullName}</h2>
+              <p>
+                This browser is currently signed in as a supporter. Log out of the fan dashboard before you sign in as an admin
+                or submit an admin access request.
+              </p>
+              <div className="detailGrid">
+                <article className="miniCard supporterCard">
+                  <span>Supporter email</span>
+                  <strong>{blockedSupporter.email}</strong>
+                </article>
+                <article className="miniCard supporterCard">
+                  <span>Favourite club</span>
+                  <strong>{blockedSupporter.favouriteClub || "Not set"}</strong>
+                </article>
+              </div>
+              <div className="actions">
+                <Link className="heroActionLink" href="/fan">
+                  Return to fan dashboard
+                </Link>
+                <button type="button" onClick={handleSupporterSignOut}>
+                  Sign out supporter session
+                </button>
+              </div>
+            </div>
+          </section>
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -94,8 +181,18 @@ export function AdminAuthPortal() {
       <section className="authDeck">
         <aside className="authStory authStoryAdmin panel">
           <p className="eyebrow">Admin Access</p>
-          <h1>Admin sign in and approval flow.</h1>
-          <p className="authCaption">Clean access for approved staff and new requests.</p>
+          <h1>Admin sign in and access requests.</h1>
+          <p className="authCaption">Secure access for approved staff and new admin requests.</p>
+          <div className="actions">
+            <HelpButton
+              title="Admin Access Guide"
+              steps={[
+                "Use Sign in if you already have an approved admin account and want to enter the admin suite.",
+                "Use Request admin access if you are a new staff user who needs approval from the super admin first.",
+                "After approval, sign in with your assigned email or full name together with the password you originally set."
+              ]}
+            />
+          </div>
         </aside>
 
         <section className="authSurface panel">
@@ -181,7 +278,6 @@ export function AdminAuthPortal() {
             </button>
           </div>
 
-          <p className="feedback">{message}</p>
         </section>
       </section>
     </main>

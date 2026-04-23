@@ -1,13 +1,23 @@
 import { apiFetch } from "./api";
 
 const ACTIVE_KEY = "football-ticket-active-supporter-profile";
+const SESSION_EVENT = "football-ticket-session-change";
 
-function saveActiveProfile(profile) {
+function emitSessionChange() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.dispatchEvent(new Event(SESSION_EVENT));
+}
+
+export function saveSupporterProfile(profile) {
   if (typeof window === "undefined") {
     return;
   }
 
   window.localStorage.setItem(ACTIVE_KEY, JSON.stringify(profile));
+  emitSessionChange();
 }
 
 export async function registerSupporterProfile(profile) {
@@ -16,7 +26,7 @@ export async function registerSupporterProfile(profile) {
     body: JSON.stringify(profile)
   });
 
-  saveActiveProfile(supporter);
+  saveSupporterProfile(supporter);
   return supporter;
 }
 
@@ -29,7 +39,7 @@ export async function signInSupporterProfile({ identifier, password }) {
     })
   });
 
-  saveActiveProfile(supporter);
+  saveSupporterProfile(supporter);
   return supporter;
 }
 
@@ -56,4 +66,5 @@ export function clearSupporterProfile() {
   }
 
   window.localStorage.removeItem(ACTIVE_KEY);
+  emitSessionChange();
 }

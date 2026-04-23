@@ -3,10 +3,58 @@ const express = require("express");
 const { requireAdmin } = require("../middleware/auth");
 const Ticket = require("../models/Ticket");
 const Match = require("../models/Match");
+const SupporterUser = require("../models/SupporterUser");
+const { recordAdminActivity, recordSupporterActivity } = require("../services/adminActivity");
 const { getTicketingContract, isEthereumAddress, mapStatus } = require("../services/blockchain");
 const { buildTicketQrCode } = require("../services/qrcode");
+const { formatPounds, getMatchTicketPricing } = require("../services/pricing");
+const { assignSeatIfNeeded, buildSeatNumber, isLegacySeatNumber } = require("../services/seatAssignment");
+const { readOnChainTicket, syncTicketFromChain } = require("../services/ticketCleanup");
 
 const router = express.Router();
+
+function exactWalletAddress(value) {
+  return new RegExp(`^${String(value || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+}
+
+function serializeMatch(match) {
+  if (!match) {
+    return null;
+  }
+
+  return {
+    matchId: match.matchId,
+    homeTeam: match.homeTeam,
+    awayTeam: match.awayTeam,
+    stadium: match.stadium,
+    matchDate: match.matchDate,
+    matchEndTime: match.matchEndTime,
+    latestCheckInTime: match.latestCheckInTime,
+    ticketPriceCredits: match.ticketPriceCredits
+  };
+}
+
+async function getNextTicketId() {
+  const existingTicket = await Ticket.findOne().sort({ ticketId: -1 });
+  return existingTicket ? existingTicket.ticketId + 1 : 1000;
+}
+
+async function hydrateTicketsWithMatches(ticketDocs) {
+  const normalizedTickets = [];
+
+  for (const ticket of ticketDocs) {
+    normalizedTickets.push(await assignSeatIfNeeded(ticket));
+  }
+
+  const matchIds = [...new Set(normalizedTickets.map((ticket) => ticket.matchId))];
+  const matches = await Match.find({ matchId: { $in: matchIds } });
+  const matchMap = new Map(matches.map((match) => [match.matchId, serializeMatch(match)]));
+
+  return normalizedTickets.map((ticket) => ({
+    ...ticket.toObject(),
+    match: matchMap.get(ticket.matchId) || null
+  }));
+}
 
 router.get("/", async (req, res, next) => {
   try {
@@ -19,7 +67,41 @@ router.get("/", async (req, res, next) => {
     }
 
     const tickets = await Ticket.find(filter).sort({ createdAt: -1 });
-    res.json(tickets);
+    const validTickets = [];
+
+    for (const ticket of tickets) {
+      const syncedTicket = await syncTicketFromChain(ticket.ticketId);
+      if (syncedTicket) {
+        validTickets.push(syncedTicket);
+      }
+    }
+
+    res.json(await hydrateTicketsWithMatches(validTickets));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/supporter/:supporterId", requireAdmin, async (req, res, next) => {
+  try {
+    const supporter = await SupporterUser.findById(req.params.supporterId);
+    if (!supporter) {
+      return res.status(404).json({ error: "Supporter not found" });
+    }
+
+    const tickets = await Ticket.find({
+      ownerAddress: exactWalletAddress(supporter.walletAddress)
+    }).sort({ createdAt: -1 });
+    const validTickets = [];
+
+    for (const ticket of tickets) {
+      const syncedTicket = await syncTicketFromChain(ticket.ticketId);
+      if (syncedTicket) {
+        validTickets.push(syncedTicket);
+      }
+    }
+
+    res.json(await hydrateTicketsWithMatches(validTickets));
   } catch (error) {
     next(error);
   }
@@ -33,21 +115,36 @@ router.get("/:ticketId", async (req, res, next) => {
       return res.status(404).json({ error: "Ticket not found" });
     }
 
-    const contract = getTicketingContract();
-    const chainTicket = await contract.getTicket(ticketId);
-    const ownerAddress = await contract.ownerOf(ticketId);
+    const chainState = await readOnChainTicket(ticketId);
+    if (!chainState.exists) {
+      await Ticket.deleteOne({ _id: ticket._id });
+      return res.status(404).json({
+        error: "This ticket belongs to a previous blockchain session. Please book a new ticket."
+      });
+    }
+
+    if (
+      String(ticket.ownerAddress || "").trim() !== chainState.ownerAddress ||
+      Number(ticket.transferCount) !== chainState.transferCount ||
+      Number(ticket.maxTransfers) !== chainState.maxTransfers ||
+      String(ticket.status || "").trim() !== chainState.status
+    ) {
+      ticket.ownerAddress = chainState.ownerAddress;
+      ticket.transferCount = chainState.transferCount;
+      ticket.maxTransfers = chainState.maxTransfers;
+      ticket.status = chainState.status;
+      await ticket.save();
+    }
+
+    const [hydratedTicket] = await hydrateTicketsWithMatches([ticket]);
 
     res.json({
-      ...ticket.toObject(),
+      ...hydratedTicket,
       onChain: {
-        ownerAddress,
-        matchId: Number(chainTicket.matchId),
-        transferCount: Number(chainTicket.transferCount),
-        maxTransfers: Number(chainTicket.maxTransfers),
-        status: mapStatus(Number(chainTicket.status)),
-        issuedAt: Number(chainTicket.issuedAt),
-        usedAt: Number(chainTicket.usedAt),
-        revokedAt: Number(chainTicket.revokedAt)
+        ownerAddress: chainState.ownerAddress,
+        transferCount: chainState.transferCount,
+        maxTransfers: chainState.maxTransfers,
+        status: chainState.status
       }
     });
   } catch (error) {
@@ -57,44 +154,73 @@ router.get("/:ticketId", async (req, res, next) => {
 
 router.post("/", requireAdmin, async (req, res, next) => {
   try {
-    const { ticketId, matchId, seatNumber, ticketType, ownerAddress, maxTransfers } = req.body;
-    if (!isEthereumAddress(String(ownerAddress || "").trim())) {
+    const { ticketId, matchId, seatNumber, ticketType, ownerAddress, maxTransfers, supporterId } = req.body;
+    const supporter = supporterId ? await SupporterUser.findById(supporterId) : null;
+    if (supporterId && (!supporter || supporter.isDeleted)) {
+      return res.status(404).json({ error: "Supporter not found in the active directory." });
+    }
+    const resolvedOwnerAddress = String(ownerAddress || supporter?.walletAddress || "").trim();
+    const resolvedTicketId = ticketId ? Number(ticketId) : await getNextTicketId();
+    const resolvedTicketType = ticketType || "General";
+    const resolvedMaxTransfers = maxTransfers ? Number(maxTransfers) : 1;
+
+    if (!isEthereumAddress(resolvedOwnerAddress)) {
       return res.status(400).json({ error: "A valid MetaMask wallet address is required." });
     }
     const match = await Match.findOne({ matchId: Number(matchId) });
     if (!match) {
       return res.status(404).json({ error: "Match metadata not found" });
     }
+    const siblingTickets = await Ticket.find({ matchId: Number(matchId) }, { seatNumber: 1 });
+    const resolvedSeatNumber = isLegacySeatNumber(seatNumber)
+      ? await buildSeatNumber(Number(matchId), resolvedTicketId, siblingTickets.map((entry) => entry.seatNumber))
+      : seatNumber;
 
     const contract = getTicketingContract();
     const tx = await contract.mintTicket(
-      ownerAddress,
-      Number(ticketId),
+      resolvedOwnerAddress,
+      resolvedTicketId,
       Number(matchId),
-      Number(maxTransfers)
+      resolvedMaxTransfers
     );
     await tx.wait();
 
     const qrCodeDataUrl = await buildTicketQrCode({
-      ticketId: Number(ticketId),
+      ticketId: resolvedTicketId,
       matchId: Number(matchId),
-      ownerAddress
+      ownerAddress: resolvedOwnerAddress
     });
 
     const ticket = await Ticket.create({
-      ticketId: Number(ticketId),
+      ticketId: resolvedTicketId,
       matchId: Number(matchId),
-      seatNumber,
-      ticketType,
-      ownerAddress: String(ownerAddress).trim(),
+      seatNumber: resolvedSeatNumber,
+      ticketType: resolvedTicketType,
+      ownerAddress: resolvedOwnerAddress,
       qrCodeDataUrl,
       transferCount: 0,
-      maxTransfers: Number(maxTransfers),
+      maxTransfers: resolvedMaxTransfers,
       status: "Valid"
     });
 
+    const [hydratedTicket] = await hydrateTicketsWithMatches([ticket]);
+
+    await recordAdminActivity(req.admin, {
+      actionType: "TICKET_MINTED",
+      summary: `Minted ticket ${resolvedTicketId} for match ${match.matchId}.`,
+      targetType: "TICKET",
+      targetId: String(resolvedTicketId),
+      targetLabel: `${match.homeTeam} vs ${match.awayTeam}`,
+      metadata: {
+        txHash: tx.hash,
+        matchId: match.matchId,
+        ownerAddress: resolvedOwnerAddress,
+        seatNumber: resolvedSeatNumber
+      }
+    });
+
     res.status(201).json({
-      ...ticket.toObject(),
+      ...hydratedTicket,
       txHash: tx.hash
     });
   } catch (error) {
@@ -124,8 +250,24 @@ router.post("/:ticketId/transfer", requireAdmin, async (req, res, next) => {
       { new: true }
     );
 
+    const [hydratedTicket] = await hydrateTicketsWithMatches([ticket]);
+
+    await recordAdminActivity(req.admin, {
+      actionType: "TICKET_TRANSFERRED_BY_ADMIN",
+      summary: `Transferred ticket ${ticketId} between wallets from the admin console.`,
+      targetType: "TICKET",
+      targetId: String(ticketId),
+      targetLabel: String(ticket?.matchId || ""),
+      metadata: {
+        txHash: tx.hash,
+        fromAddress,
+        toAddress,
+        matchId: ticket?.matchId
+      }
+    });
+
     res.json({
-      ...ticket.toObject(),
+      ...hydratedTicket,
       txHash: tx.hash
     });
   } catch (error) {
@@ -146,8 +288,23 @@ router.post("/:ticketId/revoke", requireAdmin, async (req, res, next) => {
       { new: true }
     );
 
+    const [hydratedTicket] = await hydrateTicketsWithMatches([ticket]);
+
+    await recordAdminActivity(req.admin, {
+      actionType: "TICKET_REVOKED",
+      summary: `Revoked ticket ${ticketId}.`,
+      targetType: "TICKET",
+      targetId: String(ticketId),
+      targetLabel: String(ticket?.matchId || ""),
+      metadata: {
+        txHash: tx.hash,
+        matchId: ticket?.matchId,
+        ownerAddress: ticket?.ownerAddress
+      }
+    });
+
     res.json({
-      ...ticket.toObject(),
+      ...hydratedTicket,
       txHash: tx.hash
     });
   } catch (error) {
@@ -159,8 +316,15 @@ router.post("/:ticketId/sync-owner", async (req, res, next) => {
   try {
     const ticketId = Number(req.params.ticketId);
     const contract = getTicketingContract();
+    const existingTicket = await Ticket.findOne({ ticketId });
+    if (!existingTicket) {
+      return res.status(404).json({ error: "Ticket not found" });
+    }
+
+    const previousOwnerAddress = String(existingTicket.ownerAddress || "").trim();
     const ownerAddress = await contract.ownerOf(ticketId);
     const chainTicket = await contract.getTicket(ticketId);
+    const txHash = String(req.body?.txHash || "").trim();
 
     const ticket = await Ticket.findOneAndUpdate(
       { ticketId },
@@ -172,11 +336,33 @@ router.post("/:ticketId/sync-owner", async (req, res, next) => {
       { new: true }
     );
 
-    if (!ticket) {
-      return res.status(404).json({ error: "Ticket not found" });
+    const [hydratedTicket] = await hydrateTicketsWithMatches([ticket]);
+
+    if (txHash && previousOwnerAddress && previousOwnerAddress.toLowerCase() !== String(ownerAddress).trim().toLowerCase()) {
+      const [sender, recipient] = await Promise.all([
+        SupporterUser.findOne({ walletAddress: exactWalletAddress(previousOwnerAddress), isDeleted: false }),
+        SupporterUser.findOne({ walletAddress: exactWalletAddress(ownerAddress), isDeleted: false })
+      ]);
+
+      if (sender) {
+        await recordSupporterActivity(sender, {
+          actionType: "TICKET_TRANSFERRED",
+          summary: `Transferred ticket ${ticketId}${recipient ? ` to ${recipient.fullName}` : ""}.`,
+          targetType: "TICKET",
+          targetId: String(ticketId),
+          targetLabel: hydratedTicket?.match ? `${hydratedTicket.match.homeTeam} vs ${hydratedTicket.match.awayTeam}` : String(ticket?.matchId || ""),
+          metadata: {
+            txHash,
+            fromAddress: previousOwnerAddress,
+            toAddress: String(ownerAddress).trim(),
+            matchId: ticket?.matchId,
+            recipientName: recipient?.fullName || ""
+          }
+        });
+      }
     }
 
-    res.json(ticket);
+    res.json(hydratedTicket);
   } catch (error) {
     next(error);
   }
@@ -192,42 +378,95 @@ router.post("/purchase", async (req, res, next) => {
     if (!match) {
       return res.status(404).json({ error: "Match metadata not found" });
     }
+    const supporter = await SupporterUser.findOne({
+      walletAddress: exactWalletAddress(ownerAddress),
+      isDeleted: false
+    });
+    if (!supporter) {
+      return res.status(404).json({ error: "Supporter account not found for the connected wallet." });
+    }
+    const pricing = getMatchTicketPricing(match, supporter);
 
-    const existingTicket = await Ticket.findOne().sort({ ticketId: -1 });
-    const ticketId = existingTicket ? existingTicket.ticketId + 1 : 1000;
-    const seatNumber = `AUTO-${ticketId}`;
+    if ((supporter.creditBalance || 0) < pricing.finalPrice) {
+      return res.status(400).json({
+        error: `This ticket costs ${formatPounds(pricing.finalPrice)}, but the supporter balance is only ${formatPounds(supporter.creditBalance || 0)}.`
+      });
+    }
 
-    const contract = getTicketingContract();
-    const tx = await contract.mintTicket(
-      ownerAddress,
-      Number(ticketId),
-      Number(matchId),
-      1
+    const ticketId = await getNextTicketId();
+    const siblingTickets = await Ticket.find({ matchId: Number(matchId) }, { seatNumber: 1 });
+    const seatNumber = await buildSeatNumber(Number(matchId), ticketId, siblingTickets.map((entry) => entry.seatNumber));
+
+    await SupporterUser.updateOne(
+      { _id: supporter._id },
+      { $inc: { creditBalance: -pricing.finalPrice } }
     );
-    await tx.wait();
 
-    const qrCodeDataUrl = await buildTicketQrCode({
-      ticketId: Number(ticketId),
-      matchId: Number(matchId),
-      ownerAddress
-    });
+    try {
+      const contract = getTicketingContract();
+      const tx = await contract.mintTicket(
+        ownerAddress,
+        Number(ticketId),
+        Number(matchId),
+        1
+      );
+      await tx.wait();
 
-    const ticket = await Ticket.create({
-      ticketId: Number(ticketId),
-      matchId: Number(matchId),
-      seatNumber,
-      ticketType: ticketType || "General",
-      ownerAddress: String(ownerAddress).trim(),
-      qrCodeDataUrl,
-      transferCount: 0,
-      maxTransfers: 1,
-      status: "Valid"
-    });
+      const qrCodeDataUrl = await buildTicketQrCode({
+        ticketId: Number(ticketId),
+        matchId: Number(matchId),
+        ownerAddress
+      });
 
-    res.status(201).json({
-      ...ticket.toObject(),
-      txHash: tx.hash
-    });
+      const ticket = await Ticket.create({
+        ticketId: Number(ticketId),
+        matchId: Number(matchId),
+        seatNumber,
+        ticketType: ticketType || "General",
+        ownerAddress: String(ownerAddress).trim(),
+        qrCodeDataUrl,
+        transferCount: 0,
+        maxTransfers: 1,
+        status: "Valid"
+      });
+
+      const refreshedSupporter = await SupporterUser.findById(supporter._id);
+      const [hydratedTicket] = await hydrateTicketsWithMatches([ticket]);
+
+      await recordSupporterActivity(refreshedSupporter || supporter, {
+        actionType: "TICKET_PURCHASED",
+        summary: `Purchased ticket ${ticket.ticketId} for ${match.homeTeam} vs ${match.awayTeam}.`,
+        targetType: "TICKET",
+        targetId: String(ticket.ticketId),
+        targetLabel: `${match.homeTeam} vs ${match.awayTeam}`,
+        metadata: {
+          txHash: tx.hash,
+          matchId: match.matchId,
+          ownerAddress: String(ownerAddress).trim(),
+          seatNumber,
+          finalPricePounds: pricing.finalPrice,
+          remainingBalancePounds: Number(refreshedSupporter?.creditBalance || 0)
+        }
+      });
+
+      res.status(201).json({
+        ...hydratedTicket,
+        txHash: tx.hash,
+        basePricePounds: pricing.basePrice,
+        finalPricePounds: pricing.finalPrice,
+        discountAmountPounds: pricing.discountAmount,
+        discountApplied: pricing.discountApplied,
+        purchasePriceCredits: pricing.finalPrice,
+        remainingBalancePounds: Number(refreshedSupporter?.creditBalance || 0),
+        remainingCredits: Number(refreshedSupporter?.creditBalance || 0)
+      });
+    } catch (error) {
+      await SupporterUser.updateOne(
+        { _id: supporter._id },
+        { $inc: { creditBalance: pricing.finalPrice } }
+      );
+      throw error;
+    }
   } catch (error) {
     next(error);
   }
