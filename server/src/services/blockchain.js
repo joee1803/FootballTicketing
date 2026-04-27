@@ -205,6 +205,11 @@ async function initializeTicketingContract() {
 
   provider = new JsonRpcProvider(rpcUrl);
   signer = new NonceManager(new Wallet(privateKey, provider));
+  const deployedCode = await provider.getCode(contractAddress);
+  if (!deployedCode || deployedCode === "0x") {
+    throw new Error(`No Ticketing contract is deployed at ${contractAddress}. Start the app with npm.cmd run dev:full or run npm.cmd run server:local after Hardhat is running.`);
+  }
+
   contract = new Contract(contractAddress, loadAbi(), signer);
   initialized = true;
   activeRpcUrl = rpcUrl;

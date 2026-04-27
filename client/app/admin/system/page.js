@@ -71,21 +71,27 @@ export default function AdminSystemPage() {
     let ignore = false;
 
     async function loadSystem() {
-      const status = await apiFetch("/api/blockchain/status");
-      if (!ignore) {
-        setBlockchainStatus(status);
-      }
-
-      if (session.admin.role === "SUPER_ADMIN") {
-        const [nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs] = await Promise.all([
-          apiFetch("/api/auth/admin/list", { token: session.token }),
-          apiFetch("/api/auth/admin/requests", { token: session.token }),
-          apiFetch("/api/auth/supporters/removal-requests", { token: session.token }),
-          apiFetch("/api/auth/admin/activity", { token: session.token })
-        ]);
-
+      try {
+        const status = await apiFetch("/api/blockchain/status");
         if (!ignore) {
-          refreshLists(nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs);
+          setBlockchainStatus(status);
+        }
+
+        if (session.admin.role === "SUPER_ADMIN") {
+          const [nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs] = await Promise.all([
+            apiFetch("/api/auth/admin/list", { token: session.token }),
+            apiFetch("/api/auth/admin/requests", { token: session.token }),
+            apiFetch("/api/auth/supporters/removal-requests", { token: session.token }),
+            apiFetch("/api/auth/admin/activity", { token: session.token })
+          ]);
+
+          if (!ignore) {
+            refreshLists(nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs);
+          }
+        }
+      } catch {
+        if (!ignore) {
+          signOut();
         }
       }
     }
@@ -94,7 +100,7 @@ export default function AdminSystemPage() {
     return () => {
       ignore = true;
     };
-  }, [session]);
+  }, [session, signOut]);
 
   const confirmCopy = useMemo(() => {
     if (!confirmAction) {

@@ -64,26 +64,32 @@ export default function AdminPage() {
     let ignore = false;
 
     async function loadSummary() {
-      const [matches, supporterResult, adminResult, requests] = await Promise.all([
-        apiFetch("/api/matches"),
-        apiFetch("/api/auth/supporters", { token: session.token }),
-        session.admin.role === "SUPER_ADMIN"
-          ? apiFetch("/api/auth/admin/list", { token: session.token })
-          : Promise.resolve(null),
-        session.admin.role === "SUPER_ADMIN"
-          ? apiFetch("/api/auth/admin/requests", { token: session.token })
-          : Promise.resolve([])
-      ]);
+      try {
+        const [matches, supporterResult, adminResult, requests] = await Promise.all([
+          apiFetch("/api/matches"),
+          apiFetch("/api/auth/supporters", { token: session.token }),
+          session.admin.role === "SUPER_ADMIN"
+            ? apiFetch("/api/auth/admin/list", { token: session.token })
+            : Promise.resolve(null),
+          session.admin.role === "SUPER_ADMIN"
+            ? apiFetch("/api/auth/admin/requests", { token: session.token })
+            : Promise.resolve([])
+        ]);
 
-      const pendingRequests = requests.filter((request) => request.status === "PENDING").length;
+        const pendingRequests = requests.filter((request) => request.status === "PENDING").length;
 
-      if (!ignore) {
-        setSummary({
-          matches: matches.length,
-          supporters: supporterResult.supporters.length,
-          pendingRequests,
-          admins: adminResult?.length || 1
-        });
+        if (!ignore) {
+          setSummary({
+            matches: matches.length,
+            supporters: supporterResult.supporters.length,
+            pendingRequests,
+            admins: adminResult?.length || 1
+          });
+        }
+      } catch {
+        if (!ignore) {
+          signOut();
+        }
       }
     }
 
@@ -91,7 +97,7 @@ export default function AdminPage() {
     return () => {
       ignore = true;
     };
-  }, [session]);
+  }, [session, signOut]);
 
   if (!ready || !session) {
     return <AppStateScreen eyebrow="Admin Suite" title="Loading admin suite" message="Preparing your session, live counts, and workflow shortcuts." />;

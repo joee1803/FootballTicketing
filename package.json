@@ -5,8 +5,11 @@
   "scripts": {
     "test": "hardhat test",
     "compile": "hardhat compile",
+    "chain": "hardhat node",
     "server": "node server/src/index.js",
-    "client": "npm --prefix client run dev"
+    "server:local": "hardhat run scripts/start-local-server.js --network localhost",
+    "client": "npm.cmd --prefix client run dev",
+    "dev:full": "scripts\\dev-full.cmd"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
