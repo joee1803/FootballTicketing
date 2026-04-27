@@ -77,17 +77,21 @@ export default function AdminSystemPage() {
           setBlockchainStatus(status);
         }
 
+        const nextActivityLogs = await apiFetch("/api/auth/admin/activity", { token: session.token });
+
         if (session.admin.role === "SUPER_ADMIN") {
           const [nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs] = await Promise.all([
             apiFetch("/api/auth/admin/list", { token: session.token }),
             apiFetch("/api/auth/admin/requests", { token: session.token }),
             apiFetch("/api/auth/supporters/removal-requests", { token: session.token }),
-            apiFetch("/api/auth/admin/activity", { token: session.token })
+            Promise.resolve(nextActivityLogs)
           ]);
 
           if (!ignore) {
             refreshLists(nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs);
           }
+        } else if (!ignore) {
+          refreshLists([], [], [], nextActivityLogs);
         }
       } catch {
         if (!ignore) {
@@ -501,7 +505,11 @@ export default function AdminSystemPage() {
     <AdminWorkspace
       session={session}
       title="System"
-      description="Network status, approval queues, admin controls, and activity history live here for super-admin oversight."
+      description={
+        session.admin.role === "SUPER_ADMIN"
+          ? "Network status, approval queues, admin controls, and activity history live here for super-admin oversight."
+          : "Network status and your own recent admin actions live here for quick review."
+      }
       onSignOut={signOut}
     >
       {session.admin.role === "SUPER_ADMIN" ? (
@@ -531,7 +539,7 @@ export default function AdminSystemPage() {
           status={blockchainStatus}
           latestTransaction={latestTransaction}
           activityLogs={activityLogs}
-          title="Blockchain Status"
+          title="My Latest Transactions"
         />
       )}
 

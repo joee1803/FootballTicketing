@@ -14,6 +14,7 @@ export async function apiFetch(path, options = {}) {
   }
 
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
+    cache: "no-store",
     ...options,
     headers
   });

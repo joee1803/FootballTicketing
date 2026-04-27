@@ -12,7 +12,15 @@ function clearStaleMongoLocks(dbPath) {
     const lockPath = path.join(dbPath, fileName);
 
     if (fs.existsSync(lockPath)) {
-      fs.rmSync(lockPath, { force: true });
+      try {
+        fs.rmSync(lockPath, { force: true });
+      } catch (error) {
+        if (error?.code === "EPERM") {
+          throw new Error("The local database is already running in another app terminal. Stop the existing server before starting a second one.");
+        }
+
+        throw error;
+      }
     }
   });
 }

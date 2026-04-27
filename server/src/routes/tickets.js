@@ -10,6 +10,7 @@ const { buildTicketQrCode } = require("../services/qrcode");
 const { formatPounds, getMatchTicketPricing } = require("../services/pricing");
 const { assignSeatIfNeeded, buildSeatNumber, isLegacySeatNumber } = require("../services/seatAssignment");
 const { readOnChainTicket, syncTicketFromChain } = require("../services/ticketCleanup");
+const { syncMatchFromChain } = require("../services/matchCleanup");
 
 const router = express.Router();
 
@@ -54,6 +55,27 @@ async function hydrateTicketsWithMatches(ticketDocs) {
     ...ticket.toObject(),
     match: matchMap.get(ticket.matchId) || null
   }));
+}
+
+function isMissingOnChainMatchError(error) {
+  return String(error?.message || "").includes("The requested match does not exist on-chain.");
+}
+
+async function mintTicketWithMatchRepair({ contract, ownerAddress, ticketId, matchId, maxTransfers }) {
+  try {
+    return await contract.mintTicket(ownerAddress, ticketId, matchId, maxTransfers);
+  } catch (error) {
+    if (!isMissingOnChainMatchError(error)) {
+      throw error;
+    }
+
+    const syncedMatch = await syncMatchFromChain(matchId);
+    if (!syncedMatch) {
+      throw new Error("This match is no longer available for ticketing.");
+    }
+
+    return contract.mintTicket(ownerAddress, ticketId, matchId, maxTransfers);
+  }
 }
 
 router.get("/", async (req, res, next) => {
@@ -171,18 +193,23 @@ router.post("/", requireAdmin, async (req, res, next) => {
     if (!match) {
       return res.status(404).json({ error: "Match metadata not found" });
     }
+    const syncedMatch = await syncMatchFromChain(match.matchId);
+    if (!syncedMatch) {
+      return res.status(404).json({ error: "This match is no longer available for ticketing." });
+    }
     const siblingTickets = await Ticket.find({ matchId: Number(matchId) }, { seatNumber: 1 });
     const resolvedSeatNumber = isLegacySeatNumber(seatNumber)
       ? await buildSeatNumber(Number(matchId), resolvedTicketId, siblingTickets.map((entry) => entry.seatNumber))
       : seatNumber;
 
     const contract = getTicketingContract();
-    const tx = await contract.mintTicket(
-      resolvedOwnerAddress,
-      resolvedTicketId,
-      Number(matchId),
-      resolvedMaxTransfers
-    );
+    const tx = await mintTicketWithMatchRepair({
+      contract,
+      ownerAddress: resolvedOwnerAddress,
+      ticketId: resolvedTicketId,
+      matchId: Number(matchId),
+      maxTransfers: resolvedMaxTransfers
+    });
     await tx.wait();
 
     const qrCodeDataUrl = await buildTicketQrCode({
@@ -378,6 +405,10 @@ router.post("/purchase", async (req, res, next) => {
     if (!match) {
       return res.status(404).json({ error: "Match metadata not found" });
     }
+    const syncedMatch = await syncMatchFromChain(match.matchId);
+    if (!syncedMatch) {
+      return res.status(404).json({ error: "This match is no longer available for booking." });
+    }
     const supporter = await SupporterUser.findOne({
       walletAddress: exactWalletAddress(ownerAddress),
       isDeleted: false
@@ -404,12 +435,13 @@ router.post("/purchase", async (req, res, next) => {
 
     try {
       const contract = getTicketingContract();
-      const tx = await contract.mintTicket(
+      const tx = await mintTicketWithMatchRepair({
+        contract,
         ownerAddress,
-        Number(ticketId),
-        Number(matchId),
-        1
-      );
+        ticketId: Number(ticketId),
+        matchId: Number(matchId),
+        maxTransfers: 1
+      });
       await tx.wait();
 
       const qrCodeDataUrl = await buildTicketQrCode({

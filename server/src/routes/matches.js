@@ -11,9 +11,18 @@ const router = express.Router();
 
 router.get("/", async (_req, res, next) => {
   try {
-    // Listing fixtures should stay fast for every page load; startup and write actions keep chain state aligned.
-    const matches = await Match.find().sort({ matchDate: 1 });
-    res.json(matches);
+    // Only upcoming fixtures are bookable; each returned match is verified against the local chain.
+    const matches = await Match.find({ matchDate: { $gt: new Date() } }).sort({ matchDate: 1 });
+    const syncedMatches = [];
+
+    for (const match of matches) {
+      const syncedMatch = await syncMatchFromChain(match.matchId);
+      if (syncedMatch) {
+        syncedMatches.push(syncedMatch);
+      }
+    }
+
+    res.json(syncedMatches);
   } catch (error) {
     next(error);
   }

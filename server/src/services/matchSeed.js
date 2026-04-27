@@ -1,9 +1,11 @@
 const Match = require("../models/Match");
+const Ticket = require("../models/Ticket");
 const defaultFixtures = require("../data/defaultFixtures");
 const featuredClubFixtures = require("../data/featuredClubFixtures");
 const { getTicketingContract } = require("./blockchain");
 
 const seededFixtures = [...defaultFixtures, ...featuredClubFixtures];
+const PREVIOUS_SEED_YEAR_OFFSET = 1000000;
 
 function buildTransferCutoff(matchDate) {
   return new Date(new Date(matchDate).getTime() - 30 * 60 * 1000);
@@ -58,7 +60,24 @@ async function seedDefaultMatches() {
   let created = 0;
   let skippedPast = 0;
 
+  // The seed data is periodically moved forward for demos, so remove the previous date-based IDs.
+  const previousSeedIds = seededFixtures
+    .map((fixture) => Number(fixture.matchId) - PREVIOUS_SEED_YEAR_OFFSET)
+    .filter((matchId) => Number.isFinite(matchId) && matchId > 0);
+  if (previousSeedIds.length) {
+    await Ticket.deleteMany({ matchId: { $in: previousSeedIds } });
+    await Match.deleteMany({ matchId: { $in: previousSeedIds } });
+  }
+
   for (const fixture of seededFixtures) {
+    const matchDate = new Date(fixture.matchDate);
+    if (matchDate.getTime() <= Date.now()) {
+      await Ticket.deleteMany({ matchId: fixture.matchId });
+      await Match.deleteOne({ matchId: fixture.matchId });
+      skippedPast += 1;
+      continue;
+    }
+
     const transferCutoff = buildTransferCutoff(fixture.matchDate);
     const matchEndTime = buildMatchEndTime(fixture.matchDate);
     const ticketPriceCredits = buildTicketPriceCredits(fixture);

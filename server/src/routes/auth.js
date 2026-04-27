@@ -778,9 +778,16 @@ router.post("/supporters/:supporterId/restore", requireAdmin, requireSuperAdmin,
   }
 });
 
-router.get("/admin/activity", requireAdmin, requireSuperAdmin, async (_req, res, next) => {
+router.get("/admin/activity", requireAdmin, async (req, res, next) => {
   try {
-    const logs = await AdminActivityLog.find().sort({ createdAt: -1 }).limit(100);
+    // Super admins audit the whole platform; standard admins only see their own action trail.
+    const filter = req.admin.role === "SUPER_ADMIN"
+      ? {}
+      : {
+          actorType: "ADMIN",
+          actorAdminId: String(req.admin.id)
+        };
+    const logs = await AdminActivityLog.find(filter).sort({ createdAt: -1 }).limit(100);
     res.json(
       logs.map((entry) => ({
         id: entry._id,
