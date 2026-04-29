@@ -31,6 +31,8 @@ export default function AdminSystemPage() {
   const [removalRequests, setRemovalRequests] = useState([]);
   const [activityLogs, setActivityLogs] = useState([]);
   const [newAdminForm, setNewAdminForm] = useState(initialAdmin);
+  const [adminRemovalReason, setAdminRemovalReason] = useState("");
+  const [systemLoadError, setSystemLoadError] = useState("");
   const [activeView, setActiveView] = useState("");
   const [confirmAction, setConfirmAction] = useState(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -72,30 +74,37 @@ export default function AdminSystemPage() {
 
     async function loadSystem() {
       try {
+        setSystemLoadError("");
         const status = await apiFetch("/api/blockchain/status");
         if (!ignore) {
           setBlockchainStatus(status);
         }
 
-        const nextActivityLogs = await apiFetch("/api/auth/admin/activity", { token: session.token });
+        const loadedActivityLogs = await apiFetch("/api/auth/admin/activity", { token: session.token });
 
         if (session.admin.role === "SUPER_ADMIN") {
-          const [nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs] = await Promise.all([
-            apiFetch("/api/auth/admin/list", { token: session.token }),
+          const [nextAdmins, nextRequests, nextRemovalRequests] = await Promise.all([
+            apiFetch("/api/auth/admin/list?includeDeleted=true", { token: session.token }),
             apiFetch("/api/auth/admin/requests", { token: session.token }),
-            apiFetch("/api/auth/supporters/removal-requests", { token: session.token }),
-            Promise.resolve(nextActivityLogs)
+            apiFetch("/api/auth/supporters/removal-requests", { token: session.token })
           ]);
 
           if (!ignore) {
-            refreshLists(nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs);
+            refreshLists(nextAdmins, nextRequests, nextRemovalRequests, loadedActivityLogs);
           }
         } else if (!ignore) {
-          refreshLists([], [], [], nextActivityLogs);
+          refreshLists([], [], [], loadedActivityLogs);
         }
-      } catch {
+      } catch (error) {
         if (!ignore) {
-          signOut();
+          if (error.status === 401 || error.status === 403) {
+            signOut();
+            return;
+          }
+
+          const message = error.message || "System tools could not be loaded. Please try again.";
+          setSystemLoadError(message);
+          pushToast(message, "error");
         }
       }
     }
@@ -104,7 +113,7 @@ export default function AdminSystemPage() {
     return () => {
       ignore = true;
     };
-  }, [session, signOut]);
+  }, [pushToast, session, signOut]);
 
   const confirmCopy = useMemo(() => {
     if (!confirmAction) {
@@ -128,6 +137,19 @@ export default function AdminSystemPage() {
         message: `Are you sure you want to promote ${confirmAction.payload.name} to super admin privileges?`,
         confirmLabel: "Yes, promote admin",
         cancelLabel: "No, keep as admin"
+      };
+    }
+
+    if (confirmAction.type === "remove-admin" || confirmAction.type === "restore-admin") {
+      return {
+        eyebrow: confirmAction.type === "remove-admin" ? "Remove admin" : "Restore admin",
+        title: confirmAction.type === "remove-admin" ? "Confirm admin removal" : "Confirm admin restore",
+        message:
+          confirmAction.type === "remove-admin"
+            ? `Are you sure you want to remove ${confirmAction.payload.name} from the active admin directory?`
+            : `Are you sure you want to restore ${confirmAction.payload.name} into the active admin directory?`,
+        confirmLabel: confirmAction.type === "remove-admin" ? "Yes, remove admin" : "Yes, restore admin",
+        cancelLabel: "No, cancel"
       };
     }
 
@@ -157,6 +179,8 @@ export default function AdminSystemPage() {
 
     const pendingAdminRequests = adminRequests.filter((request) => request.status === "PENDING").length;
     const pendingRemovalRequests = removalRequests.filter((request) => request.status === "PENDING").length;
+    const activeAdmins = admins.filter((admin) => !admin.isDeleted);
+    const superAdmins = activeAdmins.filter((admin) => admin.role === "SUPER_ADMIN");
 
     return [
       {
@@ -164,7 +188,7 @@ export default function AdminSystemPage() {
         eyebrow: "Admin setup",
         title: "Create admin",
         summary: "Start here when a new approved admin needs a permanent account in the system.",
-        countLabel: `${admins.length} live admin${admins.length === 1 ? "" : "s"}`,
+        countLabel: `${activeAdmins.length} live admin${activeAdmins.length === 1 ? "" : "s"}`,
         hint: "The account is created as a standard admin first, then promoted only if needed.",
         actionLabel: "Open create admin"
       },
@@ -173,8 +197,8 @@ export default function AdminSystemPage() {
         eyebrow: "Directory",
         title: "Admin directory",
         summary: "Review the current admin list, audit roles, and promote standard admins where appropriate.",
-        countLabel: `${admins.filter((admin) => admin.role === "SUPER_ADMIN").length} super admin${admins.filter((admin) => admin.role === "SUPER_ADMIN").length === 1 ? "" : "s"}`,
-        hint: "The founding super admin stays protected and cannot be downgraded here.",
+        countLabel: `${superAdmins.length} super admin${superAdmins.length === 1 ? "" : "s"}`,
+        hint: "The founding super admin stays protected, while removed admins can be restored later.",
         actionLabel: "Open admin directory"
       },
       {
@@ -209,7 +233,7 @@ export default function AdminSystemPage() {
 
   async function reloadSuperAdminData() {
     const [nextAdmins, nextRequests, nextRemovalRequests, nextActivityLogs] = await Promise.all([
-      apiFetch("/api/auth/admin/list", { token: session.token }),
+      apiFetch("/api/auth/admin/list?includeDeleted=true", { token: session.token }),
       apiFetch("/api/auth/admin/requests", { token: session.token }),
       apiFetch("/api/auth/supporters/removal-requests", { token: session.token }),
       apiFetch("/api/auth/admin/activity", { token: session.token })
@@ -274,6 +298,26 @@ export default function AdminSystemPage() {
           token: session.token
         });
         pushToast(`${promoted.name} is now a super admin.`, "info");
+      }
+
+      if (confirmAction.type === "remove-admin") {
+        const removed = await apiFetch(`/api/auth/admin/${confirmAction.payload.id}/remove`, {
+          method: "POST",
+          token: session.token,
+          body: JSON.stringify({
+            reason: confirmAction.payload.reason || ""
+          })
+        });
+        pushToast(`${removed.name} removed from the active admin directory.`, "info");
+        setAdminRemovalReason("");
+      }
+
+      if (confirmAction.type === "restore-admin") {
+        const restored = await apiFetch(`/api/auth/admin/${confirmAction.payload.id}/restore`, {
+          method: "POST",
+          token: session.token
+        });
+        pushToast(`${restored.name} restored into the active admin directory.`, "info");
       }
 
       if (confirmAction.type === "approve-removal-request" || confirmAction.type === "deny-removal-request") {
@@ -343,14 +387,24 @@ export default function AdminSystemPage() {
     }
 
     if (view === "admin-directory") {
+      const activeAdmins = admins.filter((admin) => !admin.isDeleted);
+      const removedAdmins = admins.filter((admin) => admin.isDeleted);
+
       return (
         <SectionCard
           id="admin-directory"
           title="Admin Directory"
-          description="Full admin records with promotion controls for super admin review."
+          description="Full admin records with promotion, removal, and restore controls for super admin review."
         >
+          <div className="form">
+            <textarea
+              placeholder="Optional reason for removing an admin from the active directory."
+              value={adminRemovalReason}
+              onChange={(event) => setAdminRemovalReason(event.target.value)}
+            />
+          </div>
           <div className="listStack">
-            {admins.map((admin) => (
+            {activeAdmins.map((admin) => (
               <article className="miniCard" key={admin.id || admin._id}>
                 <strong>{admin.name}</strong>
                 <span>{admin.email}</span>
@@ -377,8 +431,68 @@ export default function AdminSystemPage() {
                     </button>
                   </div>
                 ) : null}
+                {!admin.isPrimarySuperAdmin && String(admin.id || admin._id) !== String(session.admin.id) ? (
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() =>
+                        setConfirmAction({
+                          type: "remove-admin",
+                          payload: {
+                            id: admin.id || admin._id,
+                            name: admin.name,
+                            reason: adminRemovalReason
+                          }
+                        })
+                      }
+                    >
+                      Remove admin
+                    </button>
+                  </div>
+                ) : null}
               </article>
             ))}
+            {!activeAdmins.length ? (
+              <article className="miniCard">
+                <strong>No active admins found.</strong>
+              </article>
+            ) : null}
+          </div>
+
+          <div className="sectionDivider" aria-hidden="true" />
+          <h3>Removed admins</h3>
+          <div className="listStack">
+            {removedAdmins.map((admin) => (
+              <article className="miniCard" key={admin.id || admin._id}>
+                <strong>{admin.name}</strong>
+                <span>{admin.email}</span>
+                <span>{admin.role}</span>
+                <span>Removed: {admin.deletedAt ? new Date(admin.deletedAt).toLocaleString() : "N/A"}</span>
+                {admin.deletionReason ? <span>Reason: {admin.deletionReason}</span> : null}
+                <div className="actions">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setConfirmAction({
+                        type: "restore-admin",
+                        payload: {
+                          id: admin.id || admin._id,
+                          name: admin.name
+                        }
+                      })
+                    }
+                  >
+                    Restore admin
+                  </button>
+                </div>
+              </article>
+            ))}
+            {!removedAdmins.length ? (
+              <article className="miniCard">
+                <strong>No removed admins.</strong>
+              </article>
+            ) : null}
           </div>
         </SectionCard>
       );
@@ -512,6 +626,18 @@ export default function AdminSystemPage() {
       }
       onSignOut={signOut}
     >
+      {systemLoadError ? (
+        <SectionCard
+          title="System tools unavailable"
+          description="Your admin session is still active. Refresh this section once the service is ready."
+        >
+          <article className="miniCard detailSpanTwo">
+            <span>Issue</span>
+            <strong>{systemLoadError}</strong>
+          </article>
+        </SectionCard>
+      ) : null}
+
       {session.admin.role === "SUPER_ADMIN" ? (
         <LauncherDetailFlow
           activeView={activeView}

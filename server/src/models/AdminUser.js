@@ -11,7 +11,17 @@ const adminUserSchema = new mongoose.Schema(
       required: true,
       default: "ADMIN"
     },
-    isPrimarySuperAdmin: { type: Boolean, default: false }
+    isPrimarySuperAdmin: { type: Boolean, default: false },
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date, default: null },
+    deletedByAdminId: { type: String, default: null, trim: true },
+    deletedByName: { type: String, default: null, trim: true },
+    deletedByEmail: { type: String, default: null, trim: true, lowercase: true },
+    deletionReason: { type: String, default: "", trim: true },
+    restoredAt: { type: Date, default: null },
+    restoredByAdminId: { type: String, default: null, trim: true },
+    restoredByName: { type: String, default: null, trim: true },
+    restoredByEmail: { type: String, default: null, trim: true, lowercase: true }
   },
   { timestamps: true }
 );

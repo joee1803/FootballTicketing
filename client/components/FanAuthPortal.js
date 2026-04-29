@@ -145,6 +145,18 @@ export function FanAuthPortal() {
       router.push("/fan");
     } catch (error) {
       if (error.message.includes("already linked to another supporter account")) {
+        const existingSupporter = error.data?.existingSupporter;
+        if (existingSupporter?.email) {
+          setSignInForm((current) => ({
+            ...current,
+            identifier: existingSupporter.email
+          }));
+          setMode("sign-in");
+          pushToast(`This MetaMask wallet already belongs to ${existingSupporter.fullName}. Sign in with the prefilled email or switch MetaMask accounts.`, "error");
+          return;
+        }
+
+        setMode("sign-in");
         pushToast("This MetaMask wallet is already linked to an existing supporter account. Sign in with that account or switch to a different wallet.", "error");
         return;
       }

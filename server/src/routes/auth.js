@@ -54,6 +54,10 @@ function serializeAdmin(admin) {
     email: admin.email,
     role: admin.role,
     isPrimarySuperAdmin: Boolean(admin.isPrimarySuperAdmin),
+    isDeleted: Boolean(admin.isDeleted),
+    deletedAt: admin.deletedAt,
+    deletionReason: admin.deletionReason || "",
+    restoredAt: admin.restoredAt,
     createdAt: admin.createdAt
   };
 }
@@ -107,15 +111,45 @@ async function restoreSupporterRecord(supporter, admin) {
   return supporter;
 }
 
+async function softDeleteAdmin(adminAccount, admin, reason = "") {
+  adminAccount.isDeleted = true;
+  adminAccount.deletedAt = new Date();
+  adminAccount.deletedByAdminId = String(admin.id);
+  adminAccount.deletedByName = String(admin.name || "");
+  adminAccount.deletedByEmail = String(admin.email || "").toLowerCase();
+  adminAccount.deletionReason = String(reason || "").trim();
+  adminAccount.restoredAt = null;
+  adminAccount.restoredByAdminId = null;
+  adminAccount.restoredByName = null;
+  adminAccount.restoredByEmail = null;
+  await adminAccount.save();
+  return adminAccount;
+}
+
+async function restoreAdminRecord(adminAccount, admin) {
+  adminAccount.isDeleted = false;
+  adminAccount.restoredAt = new Date();
+  adminAccount.restoredByAdminId = String(admin.id);
+  adminAccount.restoredByName = String(admin.name || "");
+  adminAccount.restoredByEmail = String(admin.email || "").toLowerCase();
+  adminAccount.deletedAt = null;
+  adminAccount.deletedByAdminId = null;
+  adminAccount.deletedByName = null;
+  adminAccount.deletedByEmail = null;
+  adminAccount.deletionReason = "";
+  await adminAccount.save();
+  return adminAccount;
+}
+
 router.post("/admin/sign-in", async (req, res, next) => {
   try {
     const identifier = String(req.body.identifier || req.body.email || "").trim();
     const password = String(req.body.password || "");
     const email = identifier.toLowerCase();
 
-    let admin = await AdminUser.findOne({ email });
+    let admin = await AdminUser.findOne({ email, isDeleted: false });
     if (!admin) {
-      const admins = await AdminUser.find({}, { passwordHash: 1, name: 1, email: 1, role: 1 });
+      const admins = await AdminUser.find({ isDeleted: false }, { passwordHash: 1, name: 1, email: 1, role: 1 });
       admin = admins.find((candidate) => normalizeName(candidate.name) === normalizeName(identifier)) || null;
     }
     if (!admin) {
@@ -143,9 +177,10 @@ router.get("/admin/me", requireAdmin, async (req, res) => {
   });
 });
 
-router.get("/admin/list", requireAdmin, requireSuperAdmin, async (_req, res, next) => {
+router.get("/admin/list", requireAdmin, requireSuperAdmin, async (req, res, next) => {
   try {
-    const admins = await AdminUser.find({}, { passwordHash: 0 }).sort({ createdAt: -1 });
+    const includeDeleted = String(req.query.includeDeleted || "").toLowerCase() === "true";
+    const admins = await AdminUser.find(includeDeleted ? {} : { isDeleted: false }, { passwordHash: 0 }).sort({ createdAt: -1 });
     res.json(admins.map(serializeAdmin));
   } catch (error) {
     next(error);
@@ -269,7 +304,13 @@ router.post("/supporters/register", async (req, res, next) => {
       isDeleted: false
     });
     if (existingWallet) {
-      return res.status(409).json({ error: "That MetaMask wallet is already linked to another supporter account." });
+      return res.status(409).json({
+        error: "That MetaMask wallet is already linked to another supporter account.",
+        existingSupporter: {
+          fullName: existingWallet.fullName,
+          email: existingWallet.email
+        }
+      });
     }
 
     const passwordHash = await hashPassword(password);
@@ -296,6 +337,9 @@ router.post("/admin/:adminId/promote", requireAdmin, requireSuperAdmin, async (r
     if (!admin) {
       return res.status(404).json({ error: "Admin account not found" });
     }
+    if (admin.isDeleted) {
+      return res.status(400).json({ error: "Restore this admin before changing their privileges." });
+    }
     if (admin.isPrimarySuperAdmin) {
       return res.status(400).json({ error: "The founding super admin account cannot be changed." });
     }
@@ -315,6 +359,67 @@ router.post("/admin/:adminId/promote", requireAdmin, requireSuperAdmin, async (r
       metadata: {
         newRole: admin.role
       }
+    });
+
+    res.json(serializeAdmin(admin));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/admin/:adminId/remove", requireAdmin, requireSuperAdmin, async (req, res, next) => {
+  try {
+    const admin = await AdminUser.findById(req.params.adminId);
+    if (!admin) {
+      return res.status(404).json({ error: "Admin account not found" });
+    }
+    if (admin.isPrimarySuperAdmin) {
+      return res.status(400).json({ error: "The founding super admin account cannot be removed." });
+    }
+    if (String(admin._id) === String(req.admin.id)) {
+      return res.status(400).json({ error: "You cannot remove the admin account currently signed in." });
+    }
+    if (admin.isDeleted) {
+      return res.status(400).json({ error: "This admin has already been removed." });
+    }
+
+    await softDeleteAdmin(admin, req.admin, String(req.body.reason || "").trim());
+
+    await recordAdminActivity(req.admin, {
+      actionType: "ADMIN_REMOVED",
+      summary: `Removed admin ${admin.name} from the active directory.`,
+      targetType: "ADMIN",
+      targetId: String(admin._id),
+      targetLabel: admin.email,
+      metadata: {
+        reason: admin.deletionReason || ""
+      }
+    });
+
+    res.json(serializeAdmin(admin));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/admin/:adminId/restore", requireAdmin, requireSuperAdmin, async (req, res, next) => {
+  try {
+    const admin = await AdminUser.findById(req.params.adminId);
+    if (!admin) {
+      return res.status(404).json({ error: "Admin account not found" });
+    }
+    if (!admin.isDeleted) {
+      return res.status(400).json({ error: "This admin is already active." });
+    }
+
+    await restoreAdminRecord(admin, req.admin);
+
+    await recordAdminActivity(req.admin, {
+      actionType: "ADMIN_RESTORED",
+      summary: `Restored admin ${admin.name} back into the active directory.`,
+      targetType: "ADMIN",
+      targetId: String(admin._id),
+      targetLabel: admin.email
     });
 
     res.json(serializeAdmin(admin));

@@ -22,10 +22,11 @@ export async function apiFetch(path, options = {}) {
   if (!response.ok) {
     const text = await response.text();
     let message = text || `Request failed with status ${response.status}`;
+    let parsed = null;
 
     if (text) {
       try {
-        const parsed = JSON.parse(text);
+        parsed = JSON.parse(text);
         if (parsed?.error) {
           message = parsed.error;
         }
@@ -34,7 +35,10 @@ export async function apiFetch(path, options = {}) {
       }
     }
 
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.data = parsed;
+    throw error;
   }
 
   return response.json();
