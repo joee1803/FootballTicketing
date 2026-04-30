@@ -1,0 +1,14 @@
+{
+  "name": "football-ticket-chain-algorand",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "create-account": "node scripts/1-create-account.js",
+    "first-transaction": "node scripts/2-first-transaction.js"
+  },
+  "dependencies": {
+    "algosdk": "^2.9.0",
+    "dotenv": "^16.6.1"
+  }
+}
