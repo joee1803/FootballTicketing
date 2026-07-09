@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: matchday-ledger-api
+    env: node
+    plan: free
+    buildCommand: npm install && npm run compile
+    startCommand: npm run server
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: MONGODB_URI
+        sync: false
+      - key: RPC_URL
+        sync: false
+      - key: PRIVATE_KEY
+        sync: false
+      - key: CONTRACT_ADDRESS
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SUPER_ADMIN_NAME
+        value: System Super Admin
+      - key: SUPER_ADMIN_EMAIL
+        sync: false
+      - key: SUPER_ADMIN_PASSWORD
+        sync: false
