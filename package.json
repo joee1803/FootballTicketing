@@ -5,6 +5,8 @@
   "scripts": {
     "test": "hardhat test",
     "compile": "hardhat compile",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "deploy:amoy": "hardhat run scripts/deploy.js --network amoy",
     "chain": "hardhat node",
     "server": "node server/src/index.js",
     "server:local": "hardhat run scripts/start-local-server.js --network localhost",
